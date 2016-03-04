@@ -32,6 +32,11 @@ enum {
  */
 typedef struct sock_handle_t sock_handle_t;
 typedef ssize_t (*sock_rdwr_t)(sock_handle_t *, void *, size_t, int);
+
+/**
+ * @WARNING Callback is a functions of thread environment.
+ *          MUST be returned normally
+ */
 typedef void *(*sock_callback_t)(sock_handle_t *, sock_rdwr_t []);
 
 #ifdef __cplusplus

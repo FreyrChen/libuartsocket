@@ -8,10 +8,10 @@ serialsrc = serial-exp.c $(serialdir)/serial.c
 all: sock-exp serial-exp;
 
 sock-exp: $(socksrc)
-	gcc -o $@ $^ -I$(sockdir) -lpthread
+	gcc -g -o $@ $^ -I$(sockdir) -lpthread
 	
 serial-exp: $(serialsrc)
-	gcc -o $@ $^ -I$(serialdir) -lpthread
+	gcc -g -o $@ $^ -I$(serialdir) -lpthread
 
 clean: sock-exp-clean serial-exp-clean;
 

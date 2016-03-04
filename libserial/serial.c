@@ -180,20 +180,26 @@ static ssize_t serial_asyn_read(serial_handle_t *s, void *buf, size_t count, int
 	if (nfds > 0) {
 		int n;
 		for (n = 0; n < nfds; n++) {
-			if ((rev[n].events & EPOLLOUT) && \
-				(((serial_handle_t *)rev[n].data.u64)->fd == s->fd)) {
+			if (((serial_handle_t *)rev[n].data.u64)->fd == s->fd) {
+				struct epoll_event save = rev[n];
 				ssize_t len;
+
 				free(rev);
+				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP))
+					return -1;
+				if (!(save.events & EPOLLIN))
+					return 0;
 				len = read(s->fd, buf, count);
-				printf("[%d][%s]\n", errno, strerror(errno));
-				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-					len = 0;
+				if (len < 0)
+					if (errno == EAGAIN)
+						len = 0;
 				return len;
 			}
 		}
 	}
 	free(rev);
-	return nfds ? -1 : 0;
+
+	return nfds < 0 ? -1 : 0;
 }
 
 static ssize_t serial_asyn_write(serial_handle_t *s, void *buf, size_t count, int timeout)
@@ -210,22 +216,26 @@ static ssize_t serial_asyn_write(serial_handle_t *s, void *buf, size_t count, in
 	if (nfds > 0) {
 		int n;
 		for (n = 0; n < nfds; n++) {
-			if ((rev[n].events & EPOLLOUT) && \
-				(((serial_handle_t *)rev[n].data.u64)->fd == s->fd)) {
+			if (((serial_handle_t *)rev[n].data.u64)->fd == s->fd) {
+				struct epoll_event save = rev[n];
 				ssize_t len;
+
 				free(rev);
+				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP))
+					return -1;
+				if (!(save.events & EPOLLOUT))
+					return 0;
 				len = write(s->fd, buf, count);
-				printf("[fd %d]write size: %ld\n", s->fd, len);
 				if (len < 0)
-					printf(" [%d][%s]\n", errno, strerror(errno));
-				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-					len = 0;
+					if (errno == EAGAIN)
+						len = 0;
 				return len;
 			}
 		}
 	}
 	free(rev);
-	return nfds ? -1 : 0;
+
+	return nfds < 0 ? -1 : 0;
 }
 
 static int serial_close(serial_handle_t *s)
@@ -243,16 +253,46 @@ static int serial_close(serial_handle_t *s)
 void serial_free(serial_handle_t **s)
 {
 	serial_handle_t *serial = *s;
+	if (serial) {
+		if (serial->fd >= 0)
+			serial_close(serial);
+		free(serial);
+		*s = NULL;
+	}
+}
 
-	if (serial->fd >= 0)
-		serial_close(serial);
-	free(serial);
-	*s = NULL;
+static int serial_alive2(serial_handle_t *s, int timeout)
+{
+	int nfds;
+	struct epoll_event *rev;
+
+	if (s->fd < 0)
+		return 0;
+	rev = malloc(sizeof(*rev) * global_epoll.nb_fds);
+	if (!rev)
+		return -1;
+	pthread_mutex_lock(&global_epoll.lock);
+	nfds = epoll_wait(global_epoll.epollfd, rev, global_epoll.nb_fds, timeout);
+	pthread_mutex_unlock(&global_epoll.lock);
+	if (nfds > 0) {
+		int n;
+		for (n = 0; n < nfds; n++) {
+			if (((serial_handle_t *)rev[n].data.u64)->fd == s->fd && \
+				(rev[n].events & EPOLLOUT)) {
+				free(rev);
+				return 0;
+			}
+		}
+	}
+	free(rev);
+	return -1;
 }
 
 int serial_alive(serial_handle_t *s)
 {
-	return s->fd < 0 ? 0 : 1;
+	if (!s)
+		return -1;
+	return s->fd < 0 ? -1 : 0;
 }
 
 static void *serial_callback(void *args)
@@ -294,27 +334,28 @@ int serial_open(serial_handle_t **s, const char *dev, unsigned int speed, const 
 		global_epoll.epollfd = epoll_create(1);
 		pthread_mutex_init(&global_epoll.lock, NULL);
 	}
-	global_epoll.ev.events   = EPOLLIN | EPOLLOUT;
+	global_epoll.ev.events   = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
 	global_epoll.ev.data.u64 = (uint64_t)sd;
-	if (epoll_ctl(global_epoll.epollfd, EPOLL_CTL_ADD, sd->fd, &global_epoll.ev))
+	pthread_mutex_lock(&global_epoll.lock);
+	if (epoll_ctl(global_epoll.epollfd, EPOLL_CTL_ADD, sd->fd, &global_epoll.ev)) {
+		pthread_mutex_unlock(&global_epoll.lock);
 		goto failure;
+	}
+	pthread_mutex_unlock(&global_epoll.lock);
 	global_epoll.nb_fds++;
-	if (!serial_asyn_write(sd, (char [1]){0}, 0, 100)) {
+	if (!serial_alive2(sd, 400)) {
 		pthread_attr_t attr;
 		int err;
 		if (!(err = pthread_attr_init(&attr))) {
 			if (!(err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) {
-				err = pthread_create(&sd->tid, NULL, &serial_callback, (void *)sd);
+				err = pthread_create(&sd->tid, &attr, &serial_callback, (void *)sd);
+				if (!*s)
+					*s = sd;
 			}
 			pthread_attr_destroy(&attr);
-		}
-		if (!err) {
-			if (!*s)
-				*s = sd;
 			return 0;
-		} else {
-			errno = err;
 		}
+		errno = err;
 	}
 failure:
 	(!*s) ? serial_free(&sd) : serial_close(sd);

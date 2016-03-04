@@ -28,6 +28,11 @@ enum {
  */
 typedef struct serial_handle_t serial_handle_t;
 typedef ssize_t (*serial_rdwr_t)(serial_handle_t *, void *, size_t, int);
+
+/**
+ * @WARNING Callback is a functions of thread environment.
+ *          MUST be returned normally
+ */
 typedef void *(*serial_callback_t)(serial_handle_t *, serial_rdwr_t []);
 
 #ifdef __cplusplus

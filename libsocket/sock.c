@@ -94,22 +94,29 @@ static ssize_t sock_asyn_read(sock_handle_t *h, void *buf, size_t count, int tim
 	if (nfds > 0) {
 		int n;
 		for (n = 0; n < nfds; n++) {
-			if ((rev[n].events & EPOLLOUT) && \
-				(((sock_handle_t *)rev[n].data.u64)->fd == h->fd)) {
+			if (((sock_handle_t *)rev[n].data.u64)->fd == h->fd) {
+				struct epoll_event save = rev[n];
 				ssize_t len;
+
 				free(rev);
+				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP))
+					return -1;
+				if (!(save.events & EPOLLIN))
+					return 0;
 				len = recv(h->fd, buf, count, 0);
-				printf("[fd %d]read size: %ld", h->fd, len);
 				if (len < 0)
-					printf(" [%d][%s]\n", errno, strerror(errno));
-				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-					len = 0;
+					if (errno == EAGAIN || errno == EWOULDBLOCK)
+						len = 0;
+				/** FIXME: */
+//				else if (len == 0)
+//					len = -1;
 				return len;
 			}
 		}
 	}
 	free(rev);
-	return nfds ? -1 : 0;
+
+	return nfds < 0 ? -1 : 0;
 }
 
 static ssize_t sock_asyn_write(sock_handle_t *h, void *buf, size_t count, int timeout)
@@ -126,22 +133,27 @@ static ssize_t sock_asyn_write(sock_handle_t *h, void *buf, size_t count, int ti
 	if (nfds > 0) {
 		int n;
 		for (n = 0; n < nfds; n++) {
-			if ((rev[n].events & EPOLLOUT) && \
-				(((sock_handle_t *)rev[n].data.u64)->fd == h->fd)) {
+			if (((sock_handle_t *)rev[n].data.u64)->fd == h->fd) {
+				struct epoll_event save = rev[n];
 				ssize_t len;
+
 				free(rev);
-				len =  send(h->fd, buf, count, 0);
-				printf("[fd %d]write size: %ld\n", h->fd, len);
-				if (len < 0)
-					printf(" [%d][%s]\n", errno, strerror(errno));
-				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-					len = 0;
+				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP))
+					return -1;
+				if (!(save.events & EPOLLOUT))
+					return 0;
+				len = send(h->fd, buf, count, 0);
+				if (len < 0) {
+					if (errno == EAGAIN || errno == EWOULDBLOCK)
+						len = 0;
+				}
 				return len;
 			}
 		}
 	}
 	free(rev);
-	return nfds ? -1 : 0;
+
+	return nfds < 0 ? -1 : 0;
 }
 
 static int sock_close(sock_handle_t *h)
@@ -160,15 +172,52 @@ void sock_free(sock_handle_t **h)
 {
 	sock_handle_t *hd = *h;
 
-	if (hd->fd >= 0)
-		sock_close(hd);
-	free(hd);
-	*h = NULL;
+	if (hd) {
+		if (hd->fd >= 0)
+			sock_close(hd);
+		free(hd);
+		*h = NULL;
+	}
+}
+
+static int sock_alive2(sock_handle_t *h, int timeout)
+{
+	int nfds;
+	struct epoll_event *rev;
+
+	if (h->fd < 0)
+		return 0;
+	rev = malloc(sizeof(*rev) * global_epoll.nb_fds);
+	if (!rev)
+		return -1;
+	pthread_mutex_lock(&global_epoll.lock);
+	nfds = epoll_wait(global_epoll.epollfd, rev, global_epoll.nb_fds, timeout);
+	pthread_mutex_unlock(&global_epoll.lock);
+	if (nfds > 0) {
+		int n;
+		for (n = 0; n < nfds; n++) {
+			if (((sock_handle_t *)rev[n].data.u64)->fd == h->fd && \
+				(rev[n].events & EPOLLOUT)) {
+				socklen_t socklen = sizeof(int);
+				int err;
+
+				getsockopt(h->fd, SOL_SOCKET, SO_ERROR, &err, &socklen);
+				if (!err) {
+					free(rev);
+					return 0;
+				}
+			}
+		}
+	}
+	free(rev);
+	return -1;
 }
 
 int sock_alive(sock_handle_t *h)
 {
-	return h->fd < 0 ? 0 : 1;
+	if (!h)
+		return -1;
+	return h->fd < 0 ? -1 : 0;
 }
 
 static void *sock_callback(void *args)
@@ -220,27 +269,28 @@ int sock_connect(sock_handle_t **h, const char *host, const char *serv, int time
 	}
 	if (timeout > MAX_CONN_TIMEOUT)
 		timeout = MAX_CONN_TIMEOUT;
-	global_epoll.ev.events   = EPOLLIN | EPOLLOUT;
+	global_epoll.ev.events   = EPOLLIN | EPOLLOUT | EPOLLRDHUP/* | EPOLLET*/;
 	global_epoll.ev.data.u64 = (uint64_t)hd;
-	if (epoll_ctl(global_epoll.epollfd, EPOLL_CTL_ADD, hd->fd, &global_epoll.ev))
+	pthread_mutex_lock(&global_epoll.lock);
+	if (epoll_ctl(global_epoll.epollfd, EPOLL_CTL_ADD, hd->fd, &global_epoll.ev)) {
+		pthread_mutex_unlock(&global_epoll.lock);
 		goto failure;
+	}
+	pthread_mutex_unlock(&global_epoll.lock);
 	global_epoll.nb_fds++;
-	if (!sock_asyn_write(hd, (char [1]){0}, 0, 100)) {
+	if (!sock_alive2(hd, timeout)) {
 		pthread_attr_t attr;
 		int err;
 		if (!(err = pthread_attr_init(&attr))) {
 			if (!(err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) {
-				err = pthread_create(&hd->tid, NULL, &sock_callback, (void *)hd);
+				err = pthread_create(&hd->tid, &attr, &sock_callback, (void *)hd);
+				if (!*h)
+					*h = hd;
 			}
 			pthread_attr_destroy(&attr);
-		}
-		if (!err) {
-			if (!*h)
-				*h = hd;
 			return 0;
-		} else {
-			errno = err;
 		}
+		errno = err;
 	}
 failure:
 	(!*h) ? sock_free(&hd) : sock_close(hd);
