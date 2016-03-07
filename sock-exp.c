@@ -80,8 +80,8 @@ int main(int argc, char *argv[])
 
 	if (argc < 2)
 		show_help(NULL);
-	if (!(colon = strrchr(argv[1], ':')) | \
-		!(host = strndup(argv[1], colon - argv[1])) | \
+	if (!(colon = strrchr(argv[1], ':')) || \
+		!(host = strndup(argv[1], colon - argv[1])) || \
 		!(serv = strdup(colon + 1))) {
 		errno = EINVAL;
 		show_help("Parameter");
