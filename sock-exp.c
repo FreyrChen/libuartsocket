@@ -13,109 +13,85 @@
 #include <fcntl.h>
 #include "sock.h"
 
-#define IP0 "127.0.0.1"
-#define PORT0 "8800"
-#define IP1 "127.0.0.1"
-#define PORT1 "8080"
+enum {
+	BUFFER_MAXSIZE = 1024,
+#define BUFFER_MAXSIZE BUFFER_MAXSIZE
+};
 
-#define STRING0	"hello world in strings-0"
-#define STRING1 "hello world in strings-1"
-
-void *cb_8800(sock_handle_t *h, sock_rdwr_t *rdwr)
+void *callback(sock_handle_t *h, sock_rdwr_t *rdwr)
 {
 	sock_rdwr_t sock_read = rdwr[SOCK_READ_INDEX];
 	sock_rdwr_t sock_write = rdwr[SOCK_WRITE_INDEX];
+	char buf[BUFFER_MAXSIZE] = {0}, *pos;
+	ssize_t len;
 
-	char buf[100] = {0};
-	char *p;
-	ssize_t len, size;
-
-	fprintf(stderr, "Call callback 8800\n");
 	while (1) {
+		pos = buf;
+		len = 0;
+
+		while (read(STDIN_FILENO, pos, sizeof(char)) > 0 && pos < &buf[BUFFER_MAXSIZE] && *pos != '\n')
+			pos++;
+		*pos = '\0';
+		if (pos == buf)
+			continue;
+
 		/** write */
-		while ((len = sock_write(h, STRING0, strlen(STRING0), 0)) <= 0) {
-			if (len == 0)
-				continue;
-			fprintf(stderr, "[cb_8800 %p] loop write(errno %d): %s\n", \
-					cb_8800, \
-					errno, \
-					strerror(errno));
+		if ((len = sock_write(h, buf, pos - buf, 1000)) <= 0) {
+			fprintf(stderr, "[%p] socket write(%ld): %s\n",callback, len, strerror(errno));
 			return ((void *)0);
 		}
-		fprintf(stderr, "[cb_8800 %p] loop write(%ld): %s\n", \
-				cb_8800, \
-				len, \
-				STRING0);
 
 		/** read */
-		while ((len = sock_read(h, buf, 100 - 1, 0)) <= 0) {
-			if (len == 0)
-				continue;
-			fprintf(stderr, "[cb_8800 %p] loop read(errno %d): %s\n", \
-					cb_8800, \
-					errno, \
-					strerror(errno));
-			return ((void *)0);
+		memset(buf, 0, BUFFER_MAXSIZE);
+		pos = buf;
+		while ((len = sock_read(h, buf, BUFFER_MAXSIZE, 1000)) >= 0) {
+			if (pos + len >= &buf[BUFFER_MAXSIZE -1]) {
+				buf[BUFFER_MAXSIZE - 1] = '\0';
+				break;
+			}
+			pos += len;
 		}
-		fprintf(stderr, "[cb_8800 %p] loop read(%ld): %s\n", cb_8800, len, buf);
+		if (len < 0 && errno != EEOF) {
+			fprintf(stderr, "[%p] socket read(%ld): %s\n", callback, len, strerror(errno));
+			return ((void *)0);
+		} else {
+			fprintf(stderr, "%s\n", buf);
+		}
 	}
 
 	return (void *)0;
 }
 
-void *cb_8080(sock_handle_t *h, sock_rdwr_t *rdwr)
+void show_help(const char *s)
 {
-	sock_rdwr_t sock_read = rdwr[SOCK_READ_INDEX];
-	sock_rdwr_t sock_write = rdwr[SOCK_WRITE_INDEX];
-
-	char buf[100] = {0};
-	ssize_t len;
-
-	fprintf(stderr, "Call callback 8080\n");
-	while (1) {
-		/** write */
-		while ((len = sock_write(h, STRING1, strlen(STRING1), 0)) <= 0) {
-			if (len == 0)
-				continue;
-			fprintf(stderr, "[cb_8080 %p] loop write(errno %d): %s\n", \
-					cb_8080, \
-					errno, \
-					strerror(errno));
-			return ((void *)0);
-		}
-		fprintf(stderr, "[cb_8080 %p] loop write(%ld): %s\n", \
-				cb_8080, \
-				len, \
-				STRING1);
-
-		/** read */
-		while ((len = sock_read(h, buf, 100 - 1, 0)) <= 0) {
-			if (len == 0)
-				continue;
-			fprintf(stderr, "[cb_8080 %p] loop read(errno %d): %s\n", \
-					cb_8080, \
-					errno, \
-					strerror(errno));
-			return ((void *)0);
-		}
-		fprintf(stderr, "[cb_8080 %p] loop read(%ld): %s\n", cb_8080, len, buf);
-	}
-
-	return (void *)0;
+	if (s)
+		fprintf(stderr, "%s: %s.\n", s, strerror(errno));
+	else
+		fprintf(stderr, \
+				"socktest [host:serv]\n" \
+				"example: socktest 127.0.0.1:80\n");
+	exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[])
 {
-	sock_handle_t *h0 = NULL, *h1 = NULL;
+	sock_handle_t *hd = NULL;
+	const char *host = NULL, *serv = NULL, *colon = NULL;
 
-	sock_connect(&h0, IP0, PORT0, 0, cb_8800);
-	sock_connect(&h1, IP1, PORT1, 0, cb_8080);
-	while (!sock_alive(h0) || !sock_alive(h1))
-		sleep(4);
+	if (argc < 2)
+		show_help(NULL);
+	if (!(colon = strrchr(argv[1], ':')) | \
+		!(host = strndup(argv[1], colon - argv[1])) | \
+		!(serv = strdup(colon + 1))) {
+		errno = EINVAL;
+		show_help("Parameter");
+	}
 
-	fprintf(stderr, "Main program exit\n");
-	sock_free(&h0);
-	sock_free(&h1);
+	if (sock_connect(&hd, host, serv, 0, callback))
+		show_help("sock_connect()");
+	while (!sock_alive(hd))
+		sleep(2);
+	sock_free(&hd);
 
 	return 0;
 }

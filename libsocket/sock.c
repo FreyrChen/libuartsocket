@@ -99,17 +99,21 @@ static ssize_t sock_asyn_read(sock_handle_t *h, void *buf, size_t count, int tim
 				ssize_t len;
 
 				free(rev);
-				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP))
+				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP)) {
+					errno = ESHUTDOWN;
 					return -1;
+				}
 				if (!(save.events & EPOLLIN))
 					return 0;
 				len = recv(h->fd, buf, count, 0);
-				if (len < 0)
+				if (len < 0) {
 					if (errno == EAGAIN || errno == EWOULDBLOCK)
 						len = 0;
-				/** FIXME: */
-//				else if (len == 0)
-//					len = -1;
+				/** XXX: it may be useful, but used on here library only */
+				} else if (len == 0) {
+					errno = EEOF;
+					len = -1;
+				}
 				return len;
 			}
 		}
@@ -138,8 +142,10 @@ static ssize_t sock_asyn_write(sock_handle_t *h, void *buf, size_t count, int ti
 				ssize_t len;
 
 				free(rev);
-				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP))
+				if ((save.events & EPOLLERR) || (save.events & EPOLLRDHUP)) {
+					errno = ESHUTDOWN;
 					return -1;
+				}
 				if (!(save.events & EPOLLOUT))
 					return 0;
 				len = send(h->fd, buf, count, 0);
